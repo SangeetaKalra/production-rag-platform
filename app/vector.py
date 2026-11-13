@@ -4,46 +4,74 @@ import time
 from functools import lru_cache
 from pinecone import Pinecone, ServerlessSpec
 from app.config import settings
-
+from pinecone import Pinecone, ServerlessSpec
+from pinecone.errors import NotFoundError, ConflictError
 log = logging.getLogger(__name__)
 
 @lru_cache(maxsize=1)
 def index():
-    """Return an initialized Pinecone index. Safe for repeated requests in one process."""
+    """Return an initialized Pinecone index."""
     s = settings()
+
     if not s.pinecone_api_key:
         raise RuntimeError("PINECONE_API_KEY is missing from .env")
+
     if not s.pinecone_index_name:
         raise RuntimeError("PINECONE_INDEX_NAME is missing from .env")
+
     pc = Pinecone(api_key=s.pinecone_api_key)
     name = s.pinecone_index_name
-    # Describe rather than list: avoids listing every index and works for existing indexes.
+
     try:
         info = pc.describe_index(name)
-    except Exception as exc:
-        # Only create on an actual 404; never hide auth/network failures.
-        if getattr(exc, 'status', None) != 404:
-            raise
-        log.info('Creating Pinecone index %s (dimension=%d, metric=cosine)', name, s.embed_dim)
+
+    except NotFoundError:
+        log.info(
+            "Creating Pinecone index %s (dimension=%d, metric=cosine)",
+            name, s.embed_dim
+        )
+
         try:
-            pc.create_index(name=name, dimension=s.embed_dim, metric='cosine',
-                spec=ServerlessSpec(cloud=s.pinecone_cloud, region=s.pinecone_region))
-        except Exception as create_exc:
-            # Another process may have created the index concurrently.
-            if getattr(create_exc, 'status', None) != 409:
-                raise
+            pc.create_index(
+                name=name,
+                dimension=s.embed_dim,
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud=s.pinecone_cloud,
+                    region=s.pinecone_region
+                )
+            )
+
+        except ConflictError:
+            # Another process created the index concurrently.
+            log.info("Index %s already exists", name)
+
         info = pc.describe_index(name)
+
     if int(info.dimension) != s.embed_dim:
-        raise ValueError(f'Pinecone index {name} dimension={info.dimension}, expected {s.embed_dim}. '
-                         'Use a different index name or matching EMBED_DIM.')
-    if str(info.metric).lower() != 'cosine':
-        raise ValueError(f'Pinecone index {name} must use cosine metric, got {info.metric}')
+        raise ValueError(
+            f"Index dimension={info.dimension}, "
+            f"expected {s.embed_dim}"
+        )
+
+    if str(info.metric).lower() != "cosine":
+        raise ValueError(
+            f"Index {name} must use cosine metric"
+        )
+
     deadline = time.monotonic() + s.pinecone_ready_timeout
-    while not pc.describe_index(name).status['ready']:
+
+    while not pc.describe_index(name).status["ready"]:
         if time.monotonic() >= deadline:
-            raise TimeoutError(f'Pinecone index {name} was not ready within {s.pinecone_ready_timeout}s')
+            raise TimeoutError(
+                f"Index {name} was not ready within "
+                f"{s.pinecone_ready_timeout}s"
+            )
+
         time.sleep(3)
-    log.info('Pinecone index %s ready', name)
+
+    log.info("Pinecone index %s ready", name)
+
     return pc.Index(name)
 
 def namespace(tenant):
